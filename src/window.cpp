@@ -3,13 +3,12 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cwctype>
 #include <exception>
-#include <numbers>
 #include <optional>
 #include <string>
 #include <utility>
+#include <commctrl.h>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/experimental/channel.hpp>
@@ -23,12 +22,8 @@ namespace {
 	constexpr auto button_command = 101;
 
 	constexpr auto blue = RGB(0, 100, 190);
-	constexpr auto green = RGB(20, 125, 65);
 	constexpr auto red = RGB(185, 35, 35);
-	constexpr auto light_red = RGB(253, 236, 236);
 	constexpr auto grey = RGB(105, 112, 122);
-	constexpr auto light_grey = RGB(210, 214, 220);
-	constexpr auto white = RGB(255, 255, 255);
 	constexpr auto black = RGB(35, 42, 52);
 
 	// one per Step
@@ -45,13 +40,6 @@ namespace {
 
 	enum class RowState { waiting, running, completed, failed };
 
-	struct Row
-	{
-		HWND title = nullptr;
-		HWND message = nullptr;
-		RowState state = RowState::waiting;
-	};
-
 	void set_text(HWND control, const std::wstring_view& text)
 	{
 		SetWindowTextW(control, std::wstring{ text }.c_str());
@@ -60,6 +48,15 @@ namespace {
 	void set_font(HWND control, HFONT font)
 	{
 		SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+	}
+
+	void set_cell(HWND list, std::size_t row, int column, const std::wstring_view& text)
+	{
+		auto value = std::wstring{ text };
+		auto item = LVITEMW{};
+		item.iSubItem = column;
+		item.pszText = value.data();
+		SendMessageW(list, LVM_SETITEMTEXTW, row, reinterpret_cast<LPARAM>(&item));
 	}
 }
 
@@ -73,26 +70,22 @@ struct Window::Impl
 
 	HWND m_Window = nullptr;
 	HWND m_Title = nullptr;
-	HWND m_Subtitle = nullptr;
+	HWND m_Steps = nullptr;
 	HWND m_Footer = nullptr;
 	HWND m_Button = nullptr;
-	std::array<Row, step_titles.size()> m_Rows;
 	std::optional<std::size_t> m_Running;
 
-	// the area between the rows and the button. it shows the footer, or - after Fail - the error (see PaintError)
-	RECT m_Status{};
-	std::wstring m_ErrorHeading;
-	std::wstring m_Error;
+	// native controls keep long errors scrollable and selectable, including at high DPI
+	HWND m_ErrorHeading = nullptr;
+	HWND m_Error = nullptr;
+	bool m_HasError = false;
 
 	HFONT m_BodyFont = nullptr;
 	HFONT m_TitleFont = nullptr;
 	HFONT m_RowFont = nullptr;
-	HFONT m_SmallFont = nullptr;
 	int m_Dpi = 96;
-	int m_RowHeight = 64;
 
 	unsigned m_Ticks = 0;
-	int m_SpinnerFrame = 0;
 
 	// whatever went wrong inside the window procedure: exceptions cannot pass through Windows
 	std::exception_ptr m_Exception;
@@ -101,6 +94,9 @@ struct Window::Impl
 		: m_Context{ context }, m_Clicks{ context }
 	{
 		SetProcessDPIAware();
+		auto controls = INITCOMMONCONTROLSEX{ sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES };
+		if (!InitCommonControlsEx(&controls))
+			throw Error{ L"Initialize preparation controls." };
 
 		auto definition = WNDCLASSEXW{};
 		definition.cbSize = sizeof(definition);
@@ -126,7 +122,7 @@ struct Window::Impl
 			throw last_error(L"Read screen dimensions");
 
 		auto width = std::min(Scale(840), static_cast<int>(workArea.right - workArea.left - 20));
-		auto height = std::min(Scale(680), static_cast<int>(workArea.bottom - workArea.top - 20));
+		auto height = std::min(Scale(560), static_cast<int>(workArea.bottom - workArea.top - 20));
 		auto left = workArea.left + (workArea.right - workArea.left - width) / 2;
 		auto top = workArea.top + (workArea.bottom - workArea.top - height) / 2;
 
@@ -173,18 +169,36 @@ struct Window::Impl
 
 	void SetRow(std::size_t index, RowState state, const std::wstring_view& message)
 	{
-		m_Rows[index].state = state;
-		::set_text(m_Rows[index].message, message);
-		InvalidateIcons();
+		constexpr auto labels = std::array{ L"Waiting", L"Working...", L"Done", L"Failed" };
+		::set_cell(m_Steps, index, 0, labels[std::to_underlying(state)]);
+		::set_cell(m_Steps, index, 2, message);
+		LayoutColumns();
+		if (state == RowState::running || state == RowState::failed) {
+			ListView_SetItemState(m_Steps, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+			ListView_SetItemState(m_Steps, static_cast<int>(index), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+			ListView_EnsureVisible(m_Steps, static_cast<int>(index), FALSE);
+		}
 	}
 
 	// the status area shows one or the other: the footer, or an error
 	void ShowStatus(const std::wstring_view& footer, const std::wstring_view& errorHeading, const std::wstring_view& error)
 	{
-		m_ErrorHeading = errorHeading;
-		m_Error = error;
+		m_HasError = !error.empty();
+		::set_text(m_ErrorHeading, errorHeading.empty() ? L"Operation failed" : errorHeading);
+		// EDIT uses CRLF for hard line breaks; exception messages can also contain bare LF.
+		auto text = std::wstring{};
+		for (auto character : error) {
+			if (character == L'\n' && (text.empty() || text.back() != L'\r'))
+				text += L'\r';
+			text += character;
+		}
+		::set_text(m_Error, text);
+		SendMessageW(m_Error, EM_SETSEL, 0, 0);
+		SendMessageW(m_Error, EM_SCROLLCARET, 0, 0);
 		::set_text(m_Footer, footer);
-		ShowWindow(m_Footer, m_Error.empty() ? SW_SHOW : SW_HIDE);
+		ShowWindow(m_Footer, m_HasError ? SW_HIDE : SW_SHOW);
+		ShowWindow(m_ErrorHeading, m_HasError ? SW_SHOW : SW_HIDE);
+		ShowWindow(m_Error, m_HasError ? SW_SHOW : SW_HIDE);
 		Layout();
 	}
 
@@ -194,9 +208,9 @@ private:
 		return MulDiv(value, m_Dpi, 96);
 	}
 
-	HWND CreateControl(const wchar_t* kind, const wchar_t* text, DWORD style, int id = 0, HWND parent = nullptr)
+	HWND CreateControl(const wchar_t* kind, const wchar_t* text, DWORD style, int id = 0)
 	{
-		auto control = CreateWindowExW(0, kind, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 1, 1, parent ? parent : m_Window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
+		auto control = CreateWindowExW(0, kind, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 1, 1, m_Window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
 		if (!control)
 			throw last_error(L"Create interface control");
 
@@ -206,13 +220,35 @@ private:
 	void CreateControls()
 	{
 		m_Title = CreateControl(L"STATIC", L"Preparing your network boot", SS_NOPREFIX);
-		m_Subtitle = CreateControl(L"STATIC", L"Setting up this computer to start Windows from your network disk.", SS_NOPREFIX);
-		for (auto index = std::size_t{ 0 }; index < m_Rows.size(); index++) {
-			m_Rows[index].title = CreateControl(L"STATIC", ::step_titles[index], SS_NOPREFIX | SS_ENDELLIPSIS);
-			m_Rows[index].message = CreateControl(L"STATIC", L"Waiting", SS_NOPREFIX | SS_ENDELLIPSIS);
+		m_Steps = CreateControl(WC_LISTVIEWW, L"", WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER);
+		ListView_SetExtendedListViewStyle(m_Steps, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+		auto header = ListView_GetHeader(m_Steps);
+		SetWindowLongPtrW(header, GWL_STYLE, GetWindowLongPtrW(header, GWL_STYLE) | HDS_NOSIZING);
+		constexpr auto columns = std::array{ L"Status", L"Preparation step", L"Details" };
+		for (auto index = std::size_t{ 0 }; index < columns.size(); index++) {
+			auto title = std::wstring{ columns[index] };
+			auto column = LVCOLUMNW{};
+			column.mask = LVCF_TEXT;
+			column.pszText = title.data();
+			if (ListView_InsertColumn(m_Steps, static_cast<int>(index), &column) == -1)
+				throw Error{ L"Create preparation columns." };
+		}
+		for (auto index = std::size_t{ 0 }; index < ::step_titles.size(); index++) {
+			auto status = std::wstring{ L"Waiting" };
+			auto row = LVITEMW{};
+			row.mask = LVIF_TEXT;
+			row.iItem = static_cast<int>(index);
+			row.pszText = status.data();
+			if (ListView_InsertItem(m_Steps, &row) == -1)
+				throw Error{ L"Create preparation step." };
+			::set_cell(m_Steps, index, 1, ::step_titles[index]);
 		}
 
-		m_Footer = CreateControl(L"STATIC", L"Please keep this computer connected to the network.", SS_NOPREFIX | SS_ENDELLIPSIS);
+		m_Footer = CreateControl(L"STATIC", L"Please keep this computer connected to the network.", SS_NOPREFIX);
+		m_ErrorHeading = CreateControl(L"STATIC", L"", SS_NOPREFIX);
+		m_Error = CreateControl(L"EDIT", L"", WS_TABSTOP | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY);
+		ShowWindow(m_ErrorHeading, SW_HIDE);
+		ShowWindow(m_Error, SW_HIDE);
 		m_Button = CreateControl(L"BUTTON", L"Preparing\u2026", WS_TABSTOP | BS_DEFPUSHBUTTON, ::button_command);
 		EnableButton(false);
 
@@ -226,7 +262,7 @@ private:
 
 	void DeleteFonts()
 	{
-		for (auto font : { &m_BodyFont, &m_TitleFont, &m_RowFont, &m_SmallFont }) {
+		for (auto font : { &m_BodyFont, &m_TitleFont, &m_RowFont }) {
 			if (*font)
 				DeleteObject(*font);
 
@@ -249,162 +285,52 @@ private:
 		m_BodyFont = create(15, FW_NORMAL);
 		m_TitleFont = create(25, FW_SEMIBOLD);
 		m_RowFont = create(16, FW_SEMIBOLD);
-		m_SmallFont = create(13, FW_NORMAL);
 
 		::set_font(m_Title, m_TitleFont);
-		::set_font(m_Subtitle, m_BodyFont);
-		::set_font(m_Footer, m_SmallFont);
+		::set_font(m_Steps, m_BodyFont);
+		::set_font(m_Footer, m_BodyFont);
+		::set_font(m_ErrorHeading, m_RowFont);
+		::set_font(m_Error, m_BodyFont);
 		::set_font(m_Button, m_BodyFont);
-		for (const auto& row : m_Rows) {
-			::set_font(row.title, m_RowFont);
-			::set_font(row.message, m_SmallFont);
-		}
 	}
 
-	// title and subtitle on top, the button at the bottom and the status area above it. the rows share what is left:
-	// each row has its icon (see Paint) on the left and two lines of text next to it.
-	// the status area grows with the error it has to show, as far as the rows can give way
+	// The list view owns row sizing and scrolling. An error gets up to half the content area;
+	// its edit control scrolls independently, so neither the rows nor the error text must be squeezed.
 	void Layout()
 	{
 		auto bounds = RECT{};
 		GetClientRect(m_Window, &bounds);
 		auto width = static_cast<int>(bounds.right);
 		auto height = static_cast<int>(bounds.bottom);
-		auto margin = Scale(28);
-		auto textLeft = Scale(78);
-		auto rowsTop = Scale(113);
-		auto statusBottom = height - Scale(60);
-		auto statusLimit = statusBottom - Scale(6) - rowsTop - Scale(46) * static_cast<int>(m_Rows.size());
-		auto statusHeight = std::max(Scale(86), std::min(MeasureError(width - margin * 2), statusLimit));
+		auto margin = Scale(24);
+		auto gap = Scale(12);
+		auto contentWidth = std::max(0, width - margin * 2);
+		auto rowsTop = Scale(76);
+		auto statusBottom = height - Scale(68);
+		auto contentHeight = std::max(0, statusBottom - rowsTop);
+		auto statusHeight = m_HasError ? std::min(Scale(170), contentHeight / 2) : Scale(24);
+		auto statusTop = statusBottom - statusHeight;
 
-		m_Status = RECT{ margin, statusBottom - statusHeight, width - margin, statusBottom };
-		m_RowHeight = (m_Status.top - Scale(6) - rowsTop) / static_cast<int>(m_Rows.size());
-
-		MoveWindow(m_Title, margin, Scale(22), width - margin * 2, Scale(36), TRUE);
-		MoveWindow(m_Subtitle, margin, Scale(66), width - margin * 2, Scale(38), TRUE);
-		for (auto index = std::size_t{ 0 }; index < m_Rows.size(); index++) {
-			auto top = rowsTop + static_cast<int>(index) * m_RowHeight;
-			MoveWindow(m_Rows[index].title, textLeft, top, width - textLeft - margin, Scale(23), TRUE);
-			MoveWindow(m_Rows[index].message, textLeft, top + Scale(24), width - textLeft - margin, Scale(19), TRUE);
-		}
-
-		MoveWindow(m_Footer, margin, m_Status.bottom - Scale(24), width - margin * 2, Scale(21), TRUE);
-		MoveWindow(m_Button, width - margin - Scale(145), height - Scale(44), Scale(145), Scale(31), TRUE);
+		MoveWindow(m_Title, margin, Scale(20), contentWidth, Scale(36), TRUE);
+		MoveWindow(m_Steps, margin, rowsTop, contentWidth, std::max(0, statusTop - gap - rowsTop), TRUE);
+		MoveWindow(m_Footer, margin, statusTop, contentWidth, statusHeight, TRUE);
+		MoveWindow(m_ErrorHeading, margin, statusTop, contentWidth, Scale(24), TRUE);
+		MoveWindow(m_Error, margin, statusTop + Scale(30), contentWidth, std::max(0, statusHeight - Scale(30)), TRUE);
+		MoveWindow(m_Button, width - margin - Scale(145), height - Scale(48), Scale(145), Scale(31), TRUE);
+		LayoutColumns();
+		auto selected = ListView_GetNextItem(m_Steps, -1, LVNI_SELECTED);
+		if (selected != -1)
+			ListView_EnsureVisible(m_Steps, selected, FALSE);
 		InvalidateRect(m_Window, nullptr, TRUE);
 	}
 
-	void InvalidateIcons()
+	void LayoutColumns()
 	{
-		auto icons = RECT{ Scale(25), Scale(108), Scale(65), Scale(113) + m_RowHeight * static_cast<int>(m_Rows.size()) };
-		InvalidateRect(m_Window, &icons, TRUE);
-	}
-
-	// the icons: an empty circle while waiting, a spinner while running, then a check mark or a cross
-	void Paint()
-	{
-		auto paint = PAINTSTRUCT{};
-		auto dc = BeginPaint(m_Window, &paint);
-		auto previousPen = SelectObject(dc, GetStockObject(DC_PEN));
-		auto previousBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
-
-		for (auto index = std::size_t{ 0 }; index < m_Rows.size(); index++) {
-			auto x = Scale(45);
-			auto y = Scale(113 + 19) + static_cast<int>(index) * m_RowHeight;
-			auto radius = Scale(12);
-			auto state = m_Rows[index].state;
-
-			if (state == RowState::running) {
-				// ten dots on a circle, the brightest one moves on with every frame
-				for (auto dot = 0; dot < 10; dot++) {
-					auto angle = 2 * std::numbers::pi * dot / 10;
-					auto dotX = x + static_cast<int>(std::cos(angle) * radius);
-					auto dotY = y + static_cast<int>(std::sin(angle) * radius);
-					auto fade = ((dot - m_SpinnerFrame) % 10 + 10) % 10;
-					auto color = RGB(20 + fade * 20, 105 + fade * 13, 190 + fade * 6);
-					SetDCPenColor(dc, color);
-					SetDCBrushColor(dc, color);
-					Ellipse(dc, dotX - Scale(2), dotY - Scale(2), dotX + Scale(3), dotY + Scale(3));
-				}
-
-				continue;
-			}
-
-			auto color = state == RowState::completed ? ::green : state == RowState::failed ? ::red : ::light_grey;
-			SetDCPenColor(dc, color);
-			SetDCBrushColor(dc, state == RowState::waiting ? ::white : color);
-			Ellipse(dc, x - radius, y - radius, x + radius, y + radius);
-			if (state == RowState::waiting)
-				continue;
-
-			auto pen = CreatePen(PS_SOLID, std::max(2, Scale(2)), ::white);
-			auto previous = SelectObject(dc, pen);
-			if (state == RowState::completed) {
-				const POINT check[]{ { x - Scale(6), y }, { x - Scale(2), y + Scale(4) }, { x + Scale(6), y - Scale(5) } };
-				Polyline(dc, check, 3);
-			}
-			else {
-				MoveToEx(dc, x - Scale(4), y - Scale(4), nullptr);
-				LineTo(dc, x + Scale(4), y + Scale(4));
-				MoveToEx(dc, x + Scale(4), y - Scale(4), nullptr);
-				LineTo(dc, x - Scale(4), y + Scale(4));
-			}
-
-			SelectObject(dc, previous);
-			DeleteObject(pen);
-		}
-
-		PaintError(dc);
-
-		SelectObject(dc, previousPen);
-		SelectObject(dc, previousBrush);
-		EndPaint(m_Window, &paint);
-	}
-
-	// the height PaintError needs for a box of this width
-	int MeasureError(int width) const
-	{
-		if (m_Error.empty())
-			return 0;
-
-		auto dc = GetDC(m_Window);
-		auto previousFont = SelectObject(dc, m_BodyFont);
-		auto text = RECT{ 0, 0, width - Scale(32), 0 };
-		DrawTextW(dc, m_Error.c_str(), -1, &text, DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
-		SelectObject(dc, previousFont);
-		ReleaseDC(m_Window, dc);
-
-		return static_cast<int>(text.bottom) + Scale(18) + (m_ErrorHeading.empty() ? 0 : Scale(25));
-	}
-
-	// a light red box with a red bar on its left: what could not be done, and below it the whole reason
-	void PaintError(HDC dc)
-	{
-		if (m_Error.empty())
-			return;
-
-		auto brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
-		SetDCBrushColor(dc, ::light_red);
-		FillRect(dc, &m_Status, brush);
-
-		auto bar = m_Status;
-		bar.right = bar.left + Scale(4);
-		SetDCBrushColor(dc, ::red);
-		FillRect(dc, &bar, brush);
-
-		auto text = RECT{ m_Status.left + Scale(18), m_Status.top + Scale(10), m_Status.right - Scale(14), m_Status.bottom - Scale(8) };
-		auto previousFont = SelectObject(dc, m_RowFont);
-		SetBkMode(dc, TRANSPARENT);
-		if (!m_ErrorHeading.empty()) {
-			SetTextColor(dc, ::red);
-			DrawTextW(dc, m_ErrorHeading.c_str(), -1, &text, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-			text.top += Scale(25);
-		}
-
-		// the reason wraps like in an edit control: also inside a long path, and without a last line cut in half
-		SelectObject(dc, m_BodyFont);
-		SetTextColor(dc, ::black);
-		DrawTextW(dc, m_Error.c_str(), -1, &text, DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
-		SelectObject(dc, previousFont);
+		auto statusWidth = ListView_GetStringWidth(m_Steps, L"Working...") + Scale(12);
+		ListView_SetColumnWidth(m_Steps, 0, statusWidth);
+		ListView_SetColumnWidth(m_Steps, 1, LVSCW_AUTOSIZE);
+		// For the last column, this fills the remaining width. Clipped details have native hover tips.
+		ListView_SetColumnWidth(m_Steps, 2, LVSCW_AUTOSIZE_USEHEADER);
 	}
 
 	// every 15ms. the window owns the thread's loop (GetMessage), so asio does not get to run its own:
@@ -420,21 +346,17 @@ private:
 		if (!m_Window)
 			return;
 
-		if (++m_Ticks % 5 == 0) {
-			m_SpinnerFrame = (m_SpinnerFrame + 1) % 10;
-			InvalidateIcons();
+		if (++m_Ticks % 20 == 0 && m_Running) {
+			constexpr auto progress = std::array{ L"Working", L"Working.", L"Working..", L"Working..." };
+			::set_cell(m_Steps, *m_Running, 0, progress[(m_Ticks / 20) % progress.size()]);
 		}
 	}
 
 	HBRUSH ColorText(HDC dc, HWND control)
 	{
-		auto color = control == m_Title ? ::blue : ::grey;
-		for (const auto& row : m_Rows) {
-			if (control == row.title)
-				color = ::black;
-			else if (control == row.message && row.state == RowState::failed)
-				color = ::red;
-		}
+		auto color = control == m_Title ? ::blue
+			: control == m_ErrorHeading ? ::red
+			: control == m_Error ? ::black : ::grey;
 
 		SetBkMode(dc, TRANSPARENT);
 		SetTextColor(dc, color);
@@ -450,8 +372,9 @@ private:
 		case WM_TIMER:
 			Tick();
 			return 0;
-		case WM_PAINT:
-			Paint();
+		case WM_SIZE:
+			if (m_Steps)
+				Layout();
 			return 0;
 		case WM_CTLCOLORSTATIC:
 			return reinterpret_cast<LRESULT>(ColorText(reinterpret_cast<HDC>(wParam), reinterpret_cast<HWND>(lParam)));
@@ -468,7 +391,16 @@ private:
 			m_Dpi = HIWORD(wParam);
 			CreateFonts();
 			auto suggested = reinterpret_cast<const RECT*>(lParam);
-			SetWindowPos(m_Window, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+			auto monitor = MONITORINFO{};
+			monitor.cbSize = sizeof(monitor);
+			if (!GetMonitorInfoW(MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST), &monitor))
+				throw last_error(L"Read display work area");
+			const auto& work = monitor.rcWork;
+			auto width = std::min(suggested->right - suggested->left, work.right - work.left);
+			auto height = std::min(suggested->bottom - suggested->top, work.bottom - work.top);
+			auto left = std::clamp(suggested->left, work.left, work.right - width);
+			auto top = std::clamp(suggested->top, work.top, work.bottom - height);
+			SetWindowPos(m_Window, nullptr, left, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
 			Layout();
 			return 0;
 		}

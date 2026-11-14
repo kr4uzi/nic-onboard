@@ -1,5 +1,6 @@
 #pragma once
 
+#include "driver_path.h"
 #include "task.h"
 
 #include <filesystem>
@@ -30,7 +31,4 @@ namespace nic_onboard {
 		// makes sure the driver's .sys exists in the offline Windows, returns the service ImagePath pointing to it
 		task<std::wstring> InstallServiceBinary(const WindowsInstallation& windows, const NetworkAdapter& adapter, const DriverPackage& package, const RegistrySnapshot& snapshot);
 	};
-
-	// where a service ImagePath points to inside the offline Windows
-	std::filesystem::path driver_binary(const WindowsInstallation& windows, std::wstring image);
 }

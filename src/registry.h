@@ -25,7 +25,7 @@ namespace nic_onboard {
 	// everything the boot plan is decided from: the offline SYSTEM hive, plus the adapter's service as WinPE runs it
 	struct RegistrySnapshot
 	{
-		std::uint32_t current_control_set = 0;
+		std::uint32_t boot_control_set = 0;
 		std::vector<NetworkClass> classes;
 		std::optional<std::uint32_t> existing_device_slot;
 		std::optional<std::wstring> installed_service_image;

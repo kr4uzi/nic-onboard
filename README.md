@@ -47,11 +47,12 @@ catches it once and hands it to `Window::Fail`, which marks the row that was run
 | `nic_onboard.*` | `NicOnboard`: the application (see above). Knows nothing about Windows. |
 | `boot_plan.*` | The decisions, as plain functions without I/O: which Windows, which adapter, `BootPlan::Create`. They throw if there is no candidate or more than one. |
 | `ibft.*` | `boot_mac_from_ibft`: the boot adapter's MAC out of the firmware table iPXE leaves behind. Pure parsing, no I/O. |
-| `window.*` | `Window`: the Win32 window. Rows with spinner/check mark/cross, the error box, and `WaitForButton`. |
+| `window.*` | `Window`: native Win32 controls for progress rows, scrollable error text, and `WaitForButton`. |
 | `winpe.*` | `WinPE`: `wpeinit`, `wpeutil reboot`. |
 | `storage.*` | `Storage`: disks, taking local disks offline, finding Windows installations. |
 | `network.*` | `Network`: the network adapters WinPE runs. |
 | `drivers.*` | `Drivers`: DISM, finding the staged package, putting the service binary in place. |
+| `driver_path.*` | Windows service path parsing and canonical boot paths, independent of the host OS and drive letters. |
 | `registry.*` | `Registry`: reading, changing and verifying the offline SYSTEM hive. |
 | `subprocess.*` | `run_process`: start a tool, `co_await` its exit. |
 | `worker.h` | `Worker`: one thread for blocking calls, see below. |
@@ -80,39 +81,47 @@ procedure), the operation that is running finishes, the next step does not begin
 
 ## Build
 
-Requirements: CMake 3.30+, a compiler and standard library with C++26 mode (GCC 16 is what this was built with), and
+Requirements: CMake 3.30+, a compiler and standard library supporting the C++23 features used here (GCC 16 is tested), and
 Boost 1.86+ headers. Boost is header-only here; the executable needs no Boost or compiler DLLs, PowerShell, WMI or .NET.
 WinPE still needs its own NIC/storage/iSCSI drivers and DISM.
 
-Cross build with mingw-w64. Hand the cross compiler only the `boost` directory, not all of `/usr/include`:
+C++23 provides the coroutines, ranges, formatting and printing this program uses. Requesting a specific standard
+keeps compiler upgrades from silently enabling a newer language mode. In particular, it avoids the GCC 16/MinGW
+C++26 duplicate exception-symbol problem without suppressing duplicate-symbol linker errors. CMake chooses the
+compiler's corresponding standard switch; older MSVC/CMake combinations may still use `/std:c++latest` to supply C++23.
+
+`CMakeLists.txt` is the build definition for all platforms; `CMakePresets.json` supplies the usual configurations.
+Visual Studio and VS Code with CMake Tools can open the repository folder directly.
+
+Cross build with mingw-w64. Expose only the `boost` directory to the cross compiler, not all of `/usr/include`:
 
 ```sh
-mkdir -p /tmp/nic-onboard-boost-headers
-ln -sfn /usr/include/boost /tmp/nic-onboard-boost-headers/boost
-cmake -S . -B build-win -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-x64.cmake \
-  -DNIC_ONBOARD_BOOST_ROOT=/tmp/nic-onboard-boost-headers
-cmake --build build-win
+mkdir -p build/boost-headers
+ln -sfn /usr/include/boost build/boost-headers/boost
+cmake --preset mingw
+cmake --build --preset mingw
 ```
 
-On Windows there is a Visual Studio solution: `nic-onboard.sln` with `src/nic-onboard.vcxproj` (v143 toolset,
-`/std:c++latest`, static runtime) and a vcpkg manifest next to it, which provides `boost-asio` (static). It needs
-Visual Studio 2022 or just its
-Build Tools with the C++ workload, and vcpkg (the one that comes with Visual Studio, or your own after
-`vcpkg integrate install`). Open the solution, or:
+The result is `build/mingw/nic-onboard.exe`. Set `NIC_ONBOARD_BOOST_ROOT` with `-D` if the headers are elsewhere.
+On SteamOS, run these commands inside the existing development container with `distrobox enter mingw-build`.
+
+On Windows, install Visual Studio 2022 or its Build Tools with the C++ workload, a recent CMake, and vcpkg.
+Set `VCPKG_ROOT` to the vcpkg installation (including the one bundled with Visual Studio):
 
 ```powershell
-msbuild nic-onboard.sln -p:Configuration=Release -p:Platform=x64
+$env:VCPKG_ROOT = "C:\path\to\vcpkg"
+cmake --preset windows
+cmake --build --preset windows
+ctest --preset windows
 ```
 
-The result is `x64\Release\nic-onboard.exe`. The solution does not use `resources.rc`: MSBuild embeds
-`application.manifest` itself. **This solution was written on Linux and has not been built yet** - neither has the
-code been compiled with MSVC, so expect a first round of fixes.
+The root vcpkg manifest provides `boost-asio`; the preset selects the static x64 triplet and runtime. The result is
+`build/windows/Release/nic-onboard.exe`. CMake also generates a solution under `build/windows` if you prefer one.
+MSVC embeds `application.manifest` directly; MinGW embeds it through `resources.rc`.
+**MSVC has not been tested here.** The Linux tests and MinGW cross-build are tested.
 
-The target is `nic-onboard.exe` (x64, GUI subsystem, regular `int main()`). Two things in the mingw build are
-workarounds: `-Wl,--allow-multiple-definition` (C++26 makes the copy constructors of `std::runtime_error` and
-`std::logic_error` constexpr, and the static libstdc++ still has its own) and the declaration of
-`SetupGetInfDriverStoreLocationW` in `network.cpp` (missing in the mingw headers, present in the import library).
+The target is `nic-onboard.exe` (x64, GUI subsystem, regular `int main()`). The declaration of
+`SetupGetInfDriverStoreLocationW` in `network.cpp` fills a gap in the MinGW headers; its import library has the function.
 
 On Arch Linux the packages are `gcc cmake ninja boost mingw-w64-gcc`.
 
@@ -128,18 +137,23 @@ nic-onboard.exe
 There are no command-line options. The program finds the iSCSI Windows installation, the connected physical NIC and
 the original adapter of the image on its own, stops if any of them is ambiguous, and waits up to 60 seconds for the
 iSCSI disk. With several cabled NICs the boot adapter is taken from the iBFT, the ACPI table iPXE leaves behind with
-the MAC it booted through (`Network::GetBootMac`); without an iBFT there has to be exactly one. After verification, click Restart. The exit code is 0 after a successful preparation, 1 otherwise.
+the MAC it booted through (`Network::GetBootMac`); without an iBFT there has to be exactly one. Multiple selected
+iBFT NICs, multiple unselected candidates, or multiple connected adapters matching the boot MAC stop preparation.
+After verification, click Restart. The exit code is 0 after a successful preparation, 1 otherwise.
 
 Things to know:
 
 - Local disks are taken offline and disabled for the WinPE session only; identities are checked again right before.
-- The control set is the one named by `Select\Current` of the offline hive, `ControlSet001` is not assumed.
+- The control set is the one named by `Select\Default` of the offline hive, which selects the next normal boot.
+  `Select\Current` describes the previous boot; `ControlSet001` is not assumed.
   A machine that was onboarded before gets its class instance slot again.
 - The published `oemNN.inf` and the driver store package in the offline Windows are found by comparing the INF
   contents with the one WinPE uses. The service binary name comes from the service's ImagePath, it is never guessed.
-- The first time, the untouched SYSTEM hive is saved as `Windows\System32\Config\SYSTEM.nic-onboard-before` on the
-  target. It is kept across later preparations.
-- Nothing is logged and the output of tools is discarded. Errors are shown in the window.
+  The saved path is relative to Windows (`System32\...`), so WinPE's drive letters and environment do not leak into it.
+- Before the registry plan is first applied, the SYSTEM hive is saved as
+  `Windows\System32\Config\SYSTEM.nic-onboard-before` on the target. This is after DISM driver injection;
+  the backup is kept across later preparations.
+- Nothing is logged and the output of tools is discarded. Errors can be scrolled, selected and copied in the window.
 - The program cannot tell a golden image from its writable snapshot: the boot service must only expose the copy.
   A failed preparation can leave a snapshot half changed: discard it and provision a new one.
 - Verification proves that the planned values were saved, not that every NIC/Windows combination boots.
@@ -151,24 +165,39 @@ which implements the same classes (`Window`, `WinPE`, `Storage`, `Network`, `Dri
 described machine, so they run on Linux:
 
 ```sh
-cmake -S . -B build-host -G Ninja
-cmake --build build-host
-ctest --test-dir build-host --output-on-failure
+cmake --preset host
+cmake --build --preset host
+ctest --preset host
 ```
 
 - `policy`: choosing Windows and the adapter (with and without the iBFT MAC), parsing an iPXE-style iBFT, ambiguity,
   GUID preservation, slot reuse, invalid control set.
+- `driver-path`: canonicalizing service paths from WinPE and existing installations, mapping them into offline
+  Windows, and rejecting ambiguous or escaping paths. Windows path rules are tested even on Linux.
 - `nic-onboard`: the order of operations, stopping at each possible failure with the right row marked, waiting for the
   iSCSI disk and its timeout, failed verification, Restart/Close/retry, a window that goes away, and that the `Worker`
   runs elsewhere and resumes on the caller's thread.
+- `registry` (Windows builds): reads `Select\Default` when `Current` differs, rejects a missing default, invalid numbers
+  or absent control sets, and reads strings without expanding WinPE environment variables. It uses a temporary key under the current
+  user, without administrator privileges or changes to the live SYSTEM hive.
 
-What is **not** covered by these tests is everything that talks to Windows: `window.cpp`, `storage.cpp`,
-`network.cpp`, `drivers.cpp`, `registry.cpp`, `subprocess.cpp`, `winpe.cpp`.
+The Windows tests can also be cross-built and run under Wine:
 
-The mingw-w64 executable was run by hand under Wine 11.20 (no WinPE, no disks): the window and its rows, the spinner,
-the error box (also with a reason of several lines), the Close button and closing the window, the ignored close request while preparing, waiting for a started
-process, the worker thread and the iSCSI timeout all behave as intended there. The code that enumerates adapters,
-services drivers and changes the registry has never run. Before changing the PXE startup, try it on disposable
-WinPE/iSCSI snapshots:
+```sh
+cmake --preset mingw -DBUILD_TESTING=ON -DCMAKE_CROSSCOMPILING_EMULATOR=wine
+cmake --build --preset mingw
+ctest --test-dir build/mingw --output-on-failure
+```
+
+These tests do not exercise real disk isolation, adapter enumeration, DISM, offline hive loading/writing, or an
+actual network boot. They also do not automate the UI or process-launching code.
+
+The three Linux test suites and four Windows suites pass; the Windows tests were run under Wine 11.20.
+A separate temporary UI harness checked the native controls at 100%, 150% and 200% DPI on a 1024x768 display:
+rows stay separate, errors scroll, Unicode error text can be copied, and the button resumes the coroutine.
+Column widths are fixed by the application: Details fills the remaining space, with hover tips for clipped text.
+Earlier manual Wine checks covered ignored close requests while preparing, process waiting and the iSCSI timeout.
+Wine does not establish that real adapter enumeration, driver servicing or offline SYSTEM changes will boot Windows.
+Before changing the PXE startup, try disposable WinPE/iSCSI snapshots:
 an unknown and a previously onboarded NIC, several NICs, a missing driver, a failing DISM, local disks coming back
 after the restart, the window at 1024x768 and with high DPI, and an actual network boot of the prepared Windows.

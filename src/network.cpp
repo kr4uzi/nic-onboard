@@ -46,17 +46,11 @@ namespace {
 
 	std::wstring registry_string(const std::wstring& key, const wchar_t* name)
 	{
-		auto size = DWORD{ 0 };
-		auto code = RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), name, RRF_RT_REG_SZ, nullptr, nullptr, &size);
-		if (code != ERROR_SUCCESS)
-			throw system_error(L"Read adapter registry value", code);
+		auto value = read_registry_string(HKEY_LOCAL_MACHINE, key.c_str(), name);
+		if (!value)
+			throw Error{ std::wstring{ L"Missing adapter registry value: " } + name };
 
-		auto buffer = std::vector<wchar_t>(size / sizeof(wchar_t) + 1);
-		code = RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), name, RRF_RT_REG_SZ, nullptr, buffer.data(), &size);
-		if (code != ERROR_SUCCESS)
-			throw system_error(L"Read adapter registry value", code);
-
-		return buffer.data();
+		return *value;
 	}
 
 	std::wstring format_mac(const std::uint8_t* address, std::size_t length)

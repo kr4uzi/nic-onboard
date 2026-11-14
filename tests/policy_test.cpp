@@ -79,6 +79,14 @@ namespace {
 		// the iBFT names the boot adapter among several, whatever the case of its MAC
 		CHECK(choose_adapter({ first, second }, L"aabbccddeeff").instance.ends_with(L"SLOT_2"));
 		CHECK(choose_adapter({ first, second }, L"001122334455").instance.ends_with(L"SLOT_1"));
+		CHECK(choose_adapter({ second, first }, L"001122334455").instance.ends_with(L"SLOT_1"));
+
+		// a duplicate MAC cannot be resolved by enumeration order; a disconnected duplicate is not a candidate
+		auto duplicate = ::adapter(L"PCI\\VEN_8086\\SLOT_3", L"aabbccddeeff");
+		::expect_error(L"Multiple connected network adapters match", [&] { choose_adapter({ second, duplicate }, L"AABBCCDDEEFF"); });
+		::expect_error(L"Multiple connected network adapters match", [&] { choose_adapter({ duplicate, second }, L"AABBCCDDEEFF"); });
+		duplicate.connected = false;
+		CHECK(choose_adapter({ duplicate, second }, L"AABBCCDDEEFF").instance.ends_with(L"SLOT_2"));
 
 		// and it is binding: a boot adapter WinPE cannot use is not replaced by another one
 		::expect_error(L"The network adapter this machine booted from (AA:BB:CC:DD:EE:FF)", [&] { choose_adapter({ first }, L"AABBCCDDEEFF"); });
@@ -115,8 +123,10 @@ namespace {
 			entry.tcpip_bound = false;
 		::expect_error(L"The original boot adapter", [&] { BootPlan::Create(observed, ::adapter(), ::package); });
 
-		observed.current_control_set = 0;
-		::expect_error(L"The offline control set", [&] { BootPlan::Create(observed, ::adapter(), ::package); });
+		for (auto invalid : { 0u, 1000u }) {
+			observed.boot_control_set = invalid;
+			::expect_error(L"The offline control set", [&] { BootPlan::Create(observed, ::adapter(), ::package); });
+		}
 	}
 
 	// an iBFT as iPXE writes it: ACPI header, control block with the fixed four offsets, then the NIC blocks
@@ -170,11 +180,27 @@ namespace {
 		table.AddNic(1, 1, second);
 		CHECK(boot_mac_from_ibft(table.bytes) == L"AABBCCDDEEFF");
 
-		// two valid NICs and no boot flag: nothing to go by
+		// neither two selected NICs nor two unselected NICs may fall back to normal adapter selection
+		for (auto flags : { 1u, 3u }) {
+			for (auto reverse : { false, true }) {
+				table = Ibft{};
+				table.AddNic(0, static_cast<std::uint8_t>(flags), reverse ? second : first);
+				table.AddNic(1, static_cast<std::uint8_t>(flags), reverse ? first : second);
+				::expect_error(L"The iSCSI boot firmware table", [&] { boot_mac_from_ibft(table.bytes); });
+			}
+
+			// repeated blocks naming the same NIC are not ambiguous
+			table = Ibft{};
+			table.AddNic(0, static_cast<std::uint8_t>(flags), first);
+			table.AddNic(1, static_cast<std::uint8_t>(flags), first);
+			CHECK(boot_mac_from_ibft(table.bytes) == L"001122334455");
+		}
+
+		// a single selected NIC still wins when it appears first
 		table = Ibft{};
-		table.AddNic(0, 1, first);
+		table.AddNic(0, 1 | 2, first);
 		table.AddNic(1, 1, second);
-		CHECK(!boot_mac_from_ibft(table.bytes));
+		CHECK(boot_mac_from_ibft(table.bytes) == L"001122334455");
 
 		// no NIC at all, and a table too short to hold a control block
 		CHECK(!boot_mac_from_ibft(Ibft{}.bytes));

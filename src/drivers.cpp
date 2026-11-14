@@ -122,10 +122,10 @@ namespace {
 
 	std::wstring install_service_binary(const WindowsInstallation& windows, const NetworkAdapter& adapter, const DriverPackage& package, const RegistrySnapshot& snapshot)
 	{
-		const auto& liveImage = snapshot.live_service_image;
-		const auto& installedImage = snapshot.installed_service_image;
+		auto liveImage = canonical_driver_image(snapshot.live_service_image);
+		auto installedImage = snapshot.installed_service_image.transform(canonical_driver_image);
 
-		// the offline Windows may already have this very driver installed: then its service is left as it is
+		// reuse an identical installed binary, but always save a path independent of WinPE's drive letters
 		auto already_installed = [&](const std::filesystem::path& staged) {
 			return installedImage && ::same_binary(staged, driver_binary(windows, *installedImage));
 		};
@@ -142,7 +142,7 @@ namespace {
 			if (already_installed(staged))
 				return *installedImage;
 
-			return staged.lexically_relative(windows.root / L"Windows").wstring();
+			return canonical_driver_image(staged.lexically_relative(windows.root / L"Windows").wstring());
 		}
 
 		// classic drivers are copied to System32\drivers (DIRID 12), which staging a driver offline does not do.
@@ -174,41 +174,6 @@ namespace {
 
 		return liveImage;
 	}
-}
-
-std::filesystem::path nic_onboard::driver_binary(const WindowsInstallation& windows, std::wstring image)
-{
-	// an ImagePath comes in many spellings, they all mean a file below the Windows directory:
-	// \SystemRoot\System32\drivers\e1d68x64.sys, System32\DriverStore\FileRepository\...\e1d68x64.sys, "\??\C:\Windows\System32\..."
-	if (image.size() >= 2 && image.front() == L'"' && image.back() == L'"')
-		image = image.substr(1, image.size() - 2);
-
-	for (const auto& prefix : { std::wstring_view{ L"\\SystemRoot\\" }, std::wstring_view{ L"%SystemRoot%\\" }, std::wstring_view{ L"%windir%\\" } }) {
-		if (equal_text(image.substr(0, prefix.size()), prefix)) {
-			image.erase(0, prefix.size());
-			break;
-		}
-	}
-
-	if (image.starts_with(L"\\??\\"))
-		image.erase(0, 4);
-
-	auto relative = std::filesystem::path{ image };
-	if (relative.has_root_name())
-		relative = relative.relative_path();
-
-	if (equal_text(relative.wstring().substr(0, 8), L"Windows\\"))
-		relative = relative.wstring().substr(8);
-
-	// only a driver below System32 is accepted, and nothing that climbs out of it
-	relative = relative.lexically_normal();
-	if (relative.is_absolute() || relative.empty()
-		|| std::ranges::any_of(relative, [](const auto& part) { return part == L".."; })
-		|| !equal_text(relative.begin()->wstring(), L"System32")
-		|| !equal_text(relative.extension().wstring(), L".sys"))
-		throw Error{ L"The driver has an unsupported service ImagePath." };
-
-	return windows.root / L"Windows" / relative;
 }
 
 task<DriverPackage> Drivers::Install(const WindowsInstallation& windows, const NetworkAdapter& adapter)

@@ -72,11 +72,14 @@ NetworkAdapter nic_onboard::choose_adapter(const std::vector<NetworkAdapter>& ad
 
 	// the firmware wrote the MAC of the adapter it booted through into the iBFT: that one, or nothing
 	if (bootMac) {
-		auto match = std::ranges::find_if(candidates, [&](const auto& adapter) { return ::same_identifier(adapter.mac, *bootMac); });
-		if (match == candidates.end())
+		std::erase_if(candidates, [&](const auto& adapter) { return !::same_identifier(adapter.mac, *bootMac); });
+		if (candidates.empty())
 			throw Error{ std::format(L"The network adapter this machine booted from ({}) has no link or no working driver in WinPE.", ::pretty_mac(*bootMac)) };
 
-		return *match;
+		if (candidates.size() > 1)
+			throw Error{ std::format(L"Multiple connected network adapters match the firmware boot MAC ({}).", ::pretty_mac(*bootMac)) };
+
+		return candidates.front();
 	}
 
 	if (candidates.empty())
@@ -90,7 +93,7 @@ NetworkAdapter nic_onboard::choose_adapter(const std::vector<NetworkAdapter>& ad
 
 BootPlan BootPlan::Create(const RegistrySnapshot& snapshot, const NetworkAdapter& adapter, const DriverPackage& package)
 {
-	if (snapshot.current_control_set == 0 || snapshot.current_control_set > 999 || package.published_inf.empty())
+	if (snapshot.boot_control_set == 0 || snapshot.boot_control_set > 999 || package.published_inf.empty())
 		throw Error{ L"The offline control set or staged driver identity is invalid." };
 
 	// the adapter the image was installed with owns the TCP/IP bindings Windows boots with, so this machine's
@@ -132,7 +135,7 @@ BootPlan BootPlan::Create(const RegistrySnapshot& snapshot, const NetworkAdapter
 	}
 
 	return BootPlan{
-		.control_set = snapshot.current_control_set,
+		.control_set = snapshot.boot_control_set,
 		.class_slot = slot,
 		.network_guid = original->guid,
 		.device_instance = adapter.instance,

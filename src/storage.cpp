@@ -146,18 +146,13 @@ namespace {
 			device.reset();
 
 			// and the device itself gets disabled for this session
-			auto deviceList = SetupDiCreateDeviceInfoList(nullptr, nullptr);
-			if (deviceList == INVALID_HANDLE_VALUE)
-				throw last_error(L"Open disk device list");
+			auto instance = disk.instance;
+			auto node = DEVINST{};
+			auto status = CM_Locate_DevNodeW(&node, instance.data(), CM_LOCATE_DEVNODE_NORMAL);
+			if (status != CR_SUCCESS)
+				throw system_error(L"Locate local disk device", CM_MapCrToWin32Err(status, ERROR_GEN_FAILURE));
 
-			auto devices = DeviceSet{ deviceList };
-
-			auto info = SP_DEVINFO_DATA{};
-			info.cbSize = sizeof(info);
-			if (!SetupDiOpenDeviceInfoW(devices.get(), disk.instance.c_str(), nullptr, 0, &info))
-				throw last_error(L"Reopen local disk device");
-
-			auto status = CM_Disable_DevNode(info.DevInst, CM_DISABLE_UI_NOT_OK);
+			status = CM_Disable_DevNode(node, CM_DISABLE_UI_NOT_OK);
 			if (status != CR_SUCCESS)
 				throw system_error(L"Temporarily disable local disk", CM_MapCrToWin32Err(status, ERROR_GEN_FAILURE));
 		}

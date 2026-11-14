@@ -36,6 +36,8 @@ namespace {
 		explicit Key(HKEY key) : m_Key{ key } {}
 
 	public:
+		HKEY NativeHandle() const { return m_Key.get(); }
+
 		static Key Open(const std::wstring& path, bool write = false)
 		{
 			auto key = HKEY{};
@@ -64,16 +66,7 @@ namespace {
 
 		std::optional<std::wstring> GetString(const wchar_t* name) const
 		{
-			constexpr auto flags = DWORD{ RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND };
-			auto size = DWORD{ 0 };
-			auto code = RegGetValueW(m_Key.get(), nullptr, name, flags, nullptr, nullptr, &size);
-			if (code == ERROR_FILE_NOT_FOUND)
-				return std::nullopt;
-
-			::check(code, L"Read registry string size");
-			auto buffer = std::vector<wchar_t>(size / sizeof(wchar_t) + 1);
-			::check(RegGetValueW(m_Key.get(), nullptr, name, flags, nullptr, buffer.data(), &size), L"Read registry string");
-			return std::wstring{ buffer.data() };
+			return read_registry_string(m_Key.get(), nullptr, name);
 		}
 
 		std::optional<DWORD> GetNumber(const wchar_t* name) const
@@ -187,18 +180,10 @@ namespace {
 			return relative.empty() ? m_Mount : std::format(L"{}\\{}", m_Mount, relative);
 		}
 
-		// an offline hive has no CurrentControlSet, that one is a link created at boot.
-		// Select\Current tells which ControlSetNNN it is going to be
-		std::uint32_t GetCurrentControlSet() const
+		// an offline hive has no CurrentControlSet link. Default selects the next normal boot.
+		std::uint32_t GetBootControlSet() const
 		{
-			auto current = Key::Open(Path(L"Select")).GetNumber(L"Current");
-			if (!current || *current == 0 || *current > 999)
-				throw Error{ L"The offline SYSTEM hive has no valid selected control set." };
-
-			if (!Key::Exists(Path(::control_set(*current))))
-				throw Error{ L"The selected control set is missing." };
-
-			return *current;
+			return read_boot_control_set(Key::Open(Path()).NativeHandle());
 		}
 
 		// writes the hive back to its file. unlike the destructor, this throws if that did not work
@@ -226,8 +211,8 @@ namespace {
 	{
 		auto hive = Hive{ windows };
 		auto snapshot = RegistrySnapshot{};
-		snapshot.current_control_set = hive.GetCurrentControlSet();
-		auto controlSet = hive.Path(::control_set(snapshot.current_control_set));
+		snapshot.boot_control_set = hive.GetBootControlSet();
+		auto controlSet = hive.Path(::control_set(snapshot.boot_control_set));
 
 		// the adapters the offline Windows knows, and which of them TCP/IP is bound to
 		auto classes = std::format(L"{}\\Control\\Class\\{}", controlSet, ::network_class);
@@ -269,10 +254,10 @@ namespace {
 	void apply(const WindowsInstallation& windows, const NetworkAdapter& adapter, const BootPlan& plan)
 	{
 		auto hive = Hive{ windows };
-		if (hive.GetCurrentControlSet() != plan.control_set)
+		if (hive.GetBootControlSet() != plan.control_set)
 			throw Error{ L"The selected offline control set changed before applying the boot plan." };
 
-		// the hive as it was before we touched it the first time. kept, also across later preparations
+		// preserve the hive before our registry changes (DISM has already staged the driver). kept across later preparations
 		auto backup = windows.root / L"Windows/System32/Config/SYSTEM.nic-onboard-before";
 		if (!std::filesystem::exists(backup))
 			Key::Open(hive.Path()).SaveTo(backup);
@@ -315,7 +300,7 @@ namespace {
 		auto classInstance = ::class_instance(plan.class_slot);
 
 		auto report = VerificationReport{};
-		report.control_set = hive.GetCurrentControlSet() == plan.control_set;
+		report.control_set = hive.GetBootControlSet() == plan.control_set;
 
 		// this scope closes all keys again before the hive is unloaded
 		{

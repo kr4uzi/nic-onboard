@@ -36,15 +36,14 @@ namespace nic_onboard {
 		// one line below the rows
 		void SetFooter(const std::wstring_view& text);
 
-		// a row shows a spinner from Begin until it is completed (check mark) or failed (cross)
+		// a row shows Working from Begin until it is Done or Failed
 		void Begin(Step step);
 		void Complete(const std::wstring_view& result);
 
-		// the row which is running gets its cross, and a box takes the place of the footer:
-		// it tells what could not be done and shows the reason in full
+		// the running row is marked Failed, and scrollable, selectable error text replaces the footer
 		void Fail(const std::wstring_view& reason);
 
-		// nothing can be clicked and the window cannot be closed, except while someone waits here:
+		// the action button and close box are enabled only while someone waits here:
 		// true if the button was clicked, false if the window was closed instead
 		task<bool> WaitForButton(const std::wstring_view& label);
 

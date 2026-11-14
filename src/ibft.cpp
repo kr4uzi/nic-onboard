@@ -66,7 +66,7 @@ std::optional<std::wstring> nic_onboard::boot_mac_from_ibft(std::span<const std:
 	if (!::block_at(table, ::control_offset, control) || control.id != ::control_id || control.length < ::control_offsets_start)
 		throw Error{ L"The iSCSI boot firmware table is damaged." };
 
-	// one NIC block is marked as the one the firmware booted from. when no block says so, a lone valid one will do
+	// a unique boot-selected NIC wins. without that flag, there must be just one distinct valid NIC
 	auto selected = std::optional<std::wstring>{};
 	auto valid = std::vector<std::wstring>{};
 	for (auto position = ::control_offset + ::control_offsets_start; position + sizeof(std::uint16_t) <= ::control_offset + control.length; position += sizeof(std::uint16_t)) {
@@ -86,10 +86,15 @@ std::optional<std::wstring> nic_onboard::boot_mac_from_ibft(std::span<const std:
 		for (auto byte : nic.mac)
 			mac += std::format(L"{:02X}", byte);
 
-		if (header.flags & ::boot_selected)
-			selected = mac;
+		if (header.flags & ::boot_selected) {
+			if (selected && *selected != mac)
+				throw Error{ L"The iSCSI boot firmware table selects multiple network adapters." };
 
-		valid.push_back(std::move(mac));
+			selected = mac;
+		}
+
+		if (!std::ranges::contains(valid, mac))
+			valid.push_back(std::move(mac));
 	}
 
 	if (selected)
@@ -97,6 +102,9 @@ std::optional<std::wstring> nic_onboard::boot_mac_from_ibft(std::span<const std:
 
 	if (valid.size() == 1)
 		return valid.front();
+
+	if (valid.size() > 1)
+		throw Error{ L"The iSCSI boot firmware table names multiple network adapters without selecting one." };
 
 	return std::nullopt;
 }

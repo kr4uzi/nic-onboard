@@ -1,6 +1,7 @@
 #include "win32.h"
 
 #include <format>
+#include <vector>
 
 using namespace nic_onboard;
 
@@ -25,4 +26,43 @@ Error nic_onboard::last_error(const std::wstring_view& operation)
 bool nic_onboard::equal_text(const std::wstring_view& left, const std::wstring_view& right)
 {
 	return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+std::optional<std::wstring> nic_onboard::read_registry_string(HKEY key, const wchar_t* subkey, const wchar_t* name)
+{
+	constexpr auto flags = DWORD{ RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND };
+	auto size = DWORD{ 0 };
+	auto code = RegGetValueW(key, subkey, name, flags, nullptr, nullptr, &size);
+	if (code == ERROR_FILE_NOT_FOUND)
+		return std::nullopt;
+
+	if (code != ERROR_SUCCESS)
+		throw system_error(std::wstring{ L"Read registry string size: " } + name, code);
+
+	auto buffer = std::vector<wchar_t>(size / sizeof(wchar_t) + 1);
+	code = RegGetValueW(key, subkey, name, flags, nullptr, buffer.data(), &size);
+	if (code != ERROR_SUCCESS)
+		throw system_error(std::wstring{ L"Read registry string: " } + name, code);
+
+	return std::wstring{ buffer.data() };
+}
+
+std::uint32_t nic_onboard::read_boot_control_set(HKEY systemHive)
+{
+	auto selected = DWORD{ 0 };
+	auto size = DWORD{ sizeof(selected) };
+	auto code = RegGetValueW(systemHive, L"Select", L"Default", RRF_RT_REG_DWORD, nullptr, &selected, &size);
+	if (code != ERROR_SUCCESS)
+		throw system_error(L"Read offline Select\\Default", code);
+
+	if (selected == 0 || selected > 999)
+		throw Error{ L"The offline SYSTEM hive has no valid default boot control set." };
+
+	auto key = HKEY{};
+	code = RegOpenKeyExW(systemHive, std::format(L"ControlSet{:03}", selected).c_str(), 0, KEY_READ, &key);
+	if (code != ERROR_SUCCESS)
+		throw system_error(L"Open the default boot control set", code);
+
+	RegCloseKey(key);
+	return selected;
 }
