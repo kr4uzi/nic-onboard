@@ -24,6 +24,13 @@
       }
     },
     {
+      "name": "mingw-x86",
+      "inherits": "mingw",
+      "displayName": "Windows x86 cross-build",
+      "binaryDir": "${sourceDir}/build/mingw-x86",
+      "toolchainFile": "${sourceDir}/cmake/mingw-x86.cmake"
+    },
+    {
       "name": "windows",
       "displayName": "Visual Studio 2022 x64",
       "generator": "Visual Studio 17 2022",
@@ -32,15 +39,26 @@
       "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
       "cacheVariables": { "VCPKG_TARGET_TRIPLET": "x64-windows-static", "BUILD_TESTING": true }
+    },
+    {
+      "name": "windows-x86",
+      "inherits": "windows",
+      "displayName": "Visual Studio 2022 x86",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/windows-x86",
+      "cacheVariables": { "VCPKG_TARGET_TRIPLET": "x86-windows-static" }
     }
   ],
   "buildPresets": [
     { "name": "host", "configurePreset": "host" },
     { "name": "mingw", "configurePreset": "mingw" },
-    { "name": "windows", "configurePreset": "windows", "configuration": "Release" }
+    { "name": "mingw-x86", "configurePreset": "mingw-x86" },
+    { "name": "windows", "configurePreset": "windows", "configuration": "Release" },
+    { "name": "windows-x86", "configurePreset": "windows-x86", "configuration": "Release" }
   ],
   "testPresets": [
     { "name": "host", "configurePreset": "host", "output": { "outputOnFailure": true } },
-    { "name": "windows", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true } }
+    { "name": "windows", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "windows-x86", "configurePreset": "windows-x86", "configuration": "Release", "output": { "outputOnFailure": true } }
   ]
 }

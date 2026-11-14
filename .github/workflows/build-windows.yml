@@ -1,0 +1,46 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows ${{ matrix.architecture }} Release
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            preset: windows
+          - architecture: x86
+            preset: windows-x86
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_ROOT=$env:VCPKG_ROOT"
+          cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: nic-onboard-windows-${{ matrix.architecture }}
+          path: build/${{ matrix.preset }}/Release/nic-onboard.exe
+          if-no-files-found: error
+          retention-days: 30

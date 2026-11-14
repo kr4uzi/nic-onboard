@@ -103,6 +103,7 @@ cmake --build --preset mingw
 ```
 
 The result is `build/mingw/nic-onboard.exe`. Set `NIC_ONBOARD_BOOST_ROOT` with `-D` if the headers are elsewhere.
+For x86, use `mingw-x86` in both commands; the result is `build/mingw-x86/nic-onboard.exe`.
 On SteamOS, run these commands inside the existing development container with `distrobox enter mingw-build`.
 
 On Windows, install Visual Studio 2022 or its Build Tools with the C++ workload, a recent CMake, and vcpkg.
@@ -117,13 +118,24 @@ ctest --preset windows
 
 The root vcpkg manifest provides `boost-asio`; the preset selects the static x64 triplet and runtime. The result is
 `build/windows/Release/nic-onboard.exe`. CMake also generates a solution under `build/windows` if you prefer one.
+For x86, use `windows-x86` in all three commands. It selects the Win32 platform and static x86 triplet, with the result
+at `build/windows-x86/Release/nic-onboard.exe`.
 MSVC embeds `application.manifest` directly; MinGW embeds it through `resources.rc`.
 **MSVC has not been tested here.** The Linux tests and MinGW cross-build are tested.
 
-The target is `nic-onboard.exe` (x64, GUI subsystem, regular `int main()`). The declaration of
+The target is `nic-onboard.exe` (x64 or x86, GUI subsystem, regular `int main()`). The declaration of
 `SetupGetInfDriverStoreLocationW` in `network.cpp` fills a gap in the MinGW headers; its import library has the function.
 
 On Arch Linux the packages are `gcc cmake ninja boost mingw-w64-gcc`.
+
+### GitHub Actions
+
+The [Build Windows workflow](.github/workflows/build-windows.yml) builds and tests x64 and x86 Release executables with
+Visual Studio 2022 on pushes to `main` and pull requests. You can also start it from **Actions → Build Windows → Run workflow**.
+It uses the same `windows` and `windows-x86` CMake presets and the runner's preinstalled vcpkg.
+
+After a successful run, open its summary and download **nic-onboard-windows-x64** or **nic-onboard-windows-x86** under **Artifacts**.
+Extract `nic-onboard.exe` from the downloaded ZIP. Artifacts are kept for 30 days.
 
 ## Use
 
@@ -133,6 +145,11 @@ against the intended writable iSCSI snapshot:
 ```bat
 nic-onboard.exe
 ```
+
+Use matching architectures for the executable, WinPE, and target Windows. The program copies WinPE's NIC driver
+package into the target, so x86 support is for preparing x86 Windows from x86 WinPE.
+[WinPE cannot run applications built for another architecture](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/winpe-intro#limitations),
+including x86 applications on x64 WinPE.
 
 There are no command-line options. The program finds the iSCSI Windows installation, the connected physical NIC and
 the original adapter of the image on its own, stops if any of them is ambiguous, and waits up to 60 seconds for the
@@ -189,10 +206,12 @@ cmake --build --preset mingw
 ctest --test-dir build/mingw --output-on-failure
 ```
 
+For x86 tests, use `mingw-x86` as the preset and `build/mingw-x86` as the test directory.
+
 These tests do not exercise real disk isolation, adapter enumeration, DISM, offline hive loading/writing, or an
 actual network boot. They also do not automate the UI or process-launching code.
 
-The three Linux test suites and four Windows suites pass; the Windows tests were run under Wine 11.20.
+The three Linux test suites and four Windows suites pass; the Windows tests were run for x64 and x86 under Wine 11.20.
 A separate temporary UI harness checked the native controls at 100%, 150% and 200% DPI on a 1024x768 display:
 rows stay separate, errors scroll, Unicode error text can be copied, and the button resumes the coroutine.
 Column widths are fixed by the application: Details fills the remaining space, with hover tips for clipped text.
