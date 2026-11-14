@@ -1,0 +1,11 @@
+/build*/
+/CMakeUserPresets.json
+
+# Visual Studio
+.vs/
+*.user
+x64/
+vcpkg_installed/
+
+# editors
+.vscode/
